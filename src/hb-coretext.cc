@@ -568,18 +568,24 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
 #define utf16_index() var1.u32
 
   ALLOCATE_ARRAY (UniChar, pchars, buffer->len * 2);
+  ALLOCATE_ARRAY (unsigned short, log_clusters, chars_len);
 
   unsigned int chars_len = 0;
   for (unsigned int i = 0; i < buffer->len; i++) {
     hb_codepoint_t c = buffer->info[i].codepoint;
+    unsigned short cluster = buffer->info[i].cluster;
     buffer->info[i].utf16_index() = chars_len;
     if (likely (c < 0x10000))
       pchars[chars_len++] = c;
+      log_clusters[chars_len++] = cluster;
     else if (unlikely (c >= 0x110000))
       pchars[chars_len++] = 0xFFFD;
+      log_clusters[chars_len++] = cluster;
     else {
       pchars[chars_len++] = 0xD800 + ((c - 0x10000) >> 10);
       pchars[chars_len++] = 0xDC00 + ((c - 0x10000) & ((1 << 10) - 1));
+      log_clusters[chars_len++] = cluster;
+      log_clusters[chars_len++] = cluster;
     }
   }
 
@@ -591,24 +597,12 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
 
   CFMutableAttributedStringRef attr_string = CFAttributedStringCreateMutable (NULL, chars_len);
   CFAttributedStringReplaceString (attr_string, CFRangeMake (0, 0), string_ref);
+  CFRelease (string_ref);
   CFAttributedStringSetAttribute (attr_string, CFRangeMake (0, chars_len),
 				  kCTFontAttributeName, font_data->ct_font);
 
   if (num_features)
   {
-    ALLOCATE_ARRAY (unsigned int, log_clusters, chars_len);
-
-    /* Need log_clusters to assign features. */
-    chars_len = 0;
-    for (unsigned int i = 0; i < buffer->len; i++)
-    {
-      hb_codepoint_t c = buffer->info[i].codepoint;
-      unsigned int cluster = buffer->info[i].cluster;
-      log_clusters[chars_len++] = cluster;
-      if (c >= 0x10000 && c < 0x110000)
-	log_clusters[chars_len++] = cluster; /* Surrogates. */
-    }
-
     unsigned int start = 0;
     range_record_t *last_range = &range_records[0];
     for (unsigned int k = 0; k < chars_len; k++)
@@ -666,7 +660,11 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
         CFRelease (run_cg_font);
 
 	CFRange range = CTRunGetStringRange (run);
-	buffer->ensure (buffer->len + range.length);
+      unsigned int chars_len = range.length;
+      for (CFIndex j = range.location + range.length - 1; j > range.location; j--)
+        if (log_clusters[j] == log_clusters[j - 1])
+          --chars_len;
+      buffer->ensure (buffer->len + chars_len);
 	if (buffer->in_error)
 	  FAIL ("Buffer resize failed");
 	hb_glyph_info_t *info = buffer->info + buffer->len;
@@ -674,22 +672,12 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
 	CGGlyph notdef = 0;
 	double advance = CTFontGetAdvancesForGlyphs (font_data->ct_font, kCTFontHorizontalOrientation, &notdef, NULL, 1);
 
-        for (CFIndex j = range.location; j < range.location + range.length; j++)
+      for (unsigned int j = 0; j < chars_len; j++)
 	{
-	    UniChar ch = CFStringGetCharacterAtIndex (string_ref, j);
-	    if (hb_in_range<UniChar> (ch, 0xDC00, 0xDFFF) && range.location < j)
-	    {
-	      ch = CFStringGetCharacterAtIndex (string_ref, j - 1);
-	      if (hb_in_range<UniChar> (ch, 0xD800, 0xDBFF))
-	        /* This is the second of a surrogate pair.  Don't need .notdef
-		 * for this one. */
-	        continue;
-	    }
-
             info->codepoint = notdef;
 	    /* TODO We have to fixup clusters later.  See vis_clusters in
 	     * hb-uniscribe.cc for example. */
-            info->cluster = j;
+            info->cluster = log_clusters[j];
 
             info->mask = advance;
             info->var1.u32 = 0;
@@ -805,7 +793,6 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
     }
   }
 
-  CFRelease (string_ref);
   CFRelease (line);
 
   return true;
