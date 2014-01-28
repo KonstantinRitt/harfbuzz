@@ -652,6 +652,15 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
   {
     CTRunRef run = (CTRunRef) CFArrayGetValueAtIndex (glyph_runs, i);
 
+    unsigned int num_glyphs = CTRunGetGlyphCount (run);
+
+    buffer->ensure (buffer->len + num_glyphs);
+    if (buffer->in_error)
+      FAIL ("Buffer resize failed");
+
+    /* CoreText failed to shape the run, so we assume one glyph
+     * per character and build a list of invalid glyphs with zero advance.
+     */
     /* CoreText does automatic font fallback (AKA "cascading") for  characters
      * not supported by the requested font, and provides no way to turn it off,
      * so we detect if the returned run uses a font other than the requested
@@ -661,7 +670,7 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
     CFDictionaryRef attributes = CTRunGetAttributes (run);
     CTFontRef run_ct_font = static_cast<CTFontRef>(CFDictionaryGetValue (attributes, kCTFontAttributeName));
     CGFontRef run_cg_font = CTFontCopyGraphicsFont (run_ct_font, 0);
-    if (!CFEqual (run_cg_font, face_data->cg_font))
+    if (num_glyphs == 0 || !CFEqual (run_cg_font, face_data->cg_font))
     {
         CFRelease (run_cg_font);
 
@@ -701,12 +710,6 @@ _hb_coretext_shape (hb_shape_plan_t    *shape_plan,
         continue;
     }
     CFRelease (run_cg_font);
-
-    unsigned int num_glyphs = CTRunGetGlyphCount (run);
-    if (num_glyphs == 0)
-      continue;
-
-    buffer->ensure (buffer->len + num_glyphs);
 
     scratch = buffer->get_scratch_buffer (&scratch_size);
 
